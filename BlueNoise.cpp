@@ -1,6 +1,6 @@
 // MIT License
 // 
-// Copyright (C) 2018-2022, Tellusim Technologies Inc. https://tellusim.com/
+// Copyright (C) 2018-2023, Tellusim Technologies Inc. https://tellusim.com/
 // 
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -45,7 +45,14 @@ namespace Tellusim {
 	 */
 	bool BlueNoise::create(const Device &device, uint32_t width, uint32_t height, uint32_t layers) {
 		
-		// #include "BlueNoise.shader"
+		// shader source
+		#include "BlueNoise.blob"
+		String src = Blob(BlueNoise_blob_src).gets();
+		
+		// npot size
+		width = npot(max(width, (uint32_t)MinSize));
+		height = npot(max(height, (uint32_t)MinSize));
+		layers = npot(layers);
 		
 		// create Fourier transform
 		if(!transform.create(device, FourierTransform::ModeRf32i, max(width, layers), max(height, layers))) {
@@ -93,6 +100,11 @@ namespace Tellusim {
 		if(!layer_kernel.createShaderGLSL(src.get(), "LAYER_SHADER=1; GROUP_SIZE=%u", RenderGroupSize)) return false;
 		if(!layer_kernel.create()) return false;
 		
+		// create upscale kernel
+		upscale_kernel = device.createKernel().setTextures(1).setSurfaces(1);
+		if(!upscale_kernel.createShaderGLSL(src.get(), "UPSCALE_SHADER=1; GROUP_SIZE=%u", RenderGroupSize)) return false;
+		if(!upscale_kernel.create()) return false;
+		
 		// create noise buffers
 		sequence_buffer = device.createBuffer(Buffer::FlagSource | Buffer::FlagStorage, sizeof(Vector4u) * width * height);
 		position_buffer = device.createBuffer(Buffer::FlagSource | Buffer::FlagStorage, sizeof(Vector4u) * udiv(width, SampleGroupSize) * udiv(height, SampleGroupSize));
@@ -105,8 +117,20 @@ namespace Tellusim {
 	 */
 	bool BlueNoise::dispatch_kernel(const Device &device, Compute &compute, Texture &texture, Kernel &kernel, float32_t value, uint32_t index) {
 		
+		Texture noise_texture = texture;
+		
+		// upscale kernel
+		if(texture.getSize() != backward_texture.getSize()) {
+			compute.setKernel(upscale_kernel);
+			compute.setTexture(0, texture);
+			compute.setSurfaceTexture(0, upscale_texture);
+			compute.dispatch(upscale_texture);
+			compute.barrier(upscale_texture);
+			noise_texture = upscale_texture;
+		}
+		
 		// forward transform
-		if(!transform.dispatch(compute, FourierTransform::ModeRf32i, FourierTransform::ForwardRtoC, forward_textures[0], texture)) {
+		if(!transform.dispatch(compute, FourierTransform::ModeRf32i, FourierTransform::ForwardRtoC, forward_textures[0], noise_texture)) {
 			TS_LOG(Error, "BlueNoise::dispatch_kernel(): can't dispatch forward transform\n");
 			return false;
 		}
@@ -125,18 +149,18 @@ namespace Tellusim {
 		}
 		
 		// sample parameters
-		uint32_t num_groups = udiv(texture.getWidth(), SampleGroupSize);
+		uint32_t num_groups = udiv(noise_texture.getWidth(), SampleGroupSize);
 		
 		// dispatch sample kernel
 		compute.setKernel(kernel);
 		compute.setUniform(0, num_groups);
 		compute.setStorageBuffer(0, position_buffer);
-		compute.setTextures(0, { texture, backward_texture });
-		compute.dispatch(texture);
+		compute.setTextures(0, { noise_texture, backward_texture });
+		compute.dispatch(noise_texture);
 		compute.barrier(position_buffer);
 		
 		// position parameters
-		uint32_t num_positions = num_groups * udiv(texture.getHeight(), SampleGroupSize);
+		uint32_t num_positions = num_groups * udiv(noise_texture.getHeight(), SampleGroupSize);
 		
 		// dispatch reduction kernel
 		compute.setKernel(position_kernel);
@@ -147,11 +171,13 @@ namespace Tellusim {
 		
 		// update parameters
 		struct UpdateParameters {
+			Vector2u texture_size;
 			float32_t value;
 			uint32_t index;
 		};
 		
 		UpdateParameters update_parameters = {};
+		update_parameters.texture_size = Vector2u(noise_texture.getWidth(), noise_texture.getHeight());
 		update_parameters.value = value;
 		update_parameters.index = index;
 		
@@ -173,10 +199,14 @@ namespace Tellusim {
 		// check image size
 		uint32_t width = image.getWidth();
 		uint32_t height = image.getHeight();
-		if(width < MinSize || height < MinSize || layers < 1 || !ispot(width) || !ispot(height)) {
+		if(width < 1 || height < 1 || layers < 1) {
 			TS_LOGF(Error, "BlueNoise::dispatch(): invalid image size %ux%u l%u\n", width, height, layers);
 			return Image();
 		}
+		
+		// npot size
+		uint32_t npot_width = max(npot(width), (uint32_t)MinSize);
+		uint32_t npot_height = max(npot(height), (uint32_t)MinSize);
 		
 		// current time
 		uint64_t begin = Time::current();
@@ -228,18 +258,18 @@ namespace Tellusim {
 		
 		// create kernel image
 		Image kernel_image;
-		kernel_image.create2D(FormatRf32, width, height);
+		kernel_image.create2D(FormatRf32, npot_width, npot_height);
 		ImageSampler kernel_sampler(kernel_image);
 		
 		// generate Gaussian kernel
 		float64_t weight = 0.0;
 		float32_t isigma = 1.0f / (sigma * sigma + 1e-6f);
-		for(uint32_t y0 = 0; y0 < height / 2; y0++) {
-			uint32_t y1 = height - 1 - y0;
+		for(uint32_t y0 = 0; y0 < npot_height / 2; y0++) {
+			uint32_t y1 = npot_height - 1 - y0;
 			float32_t dy0 = (float32_t)y0;
 			float32_t dy1 = dy0 + 1.0f;
-			for(uint32_t x0 = 0; x0 < width / 2; x0++) {
-				uint32_t x1 = width - 1 - x0;
+			for(uint32_t x0 = 0; x0 < npot_width / 2; x0++) {
+				uint32_t x1 = npot_width - 1 - x0;
 				float32_t dx0 = (float32_t)x0;
 				float32_t dx1 = dx0 + 1.0f;
 				float32_t d00 = dx0 * dx0 + dy0 * dy0;
@@ -257,9 +287,9 @@ namespace Tellusim {
 				weight += k00 + k01 + k10 + k11;
 			}
 		}
-		float32_t iweight = (float32_t)(width / weight);
-		for(uint32_t y = 0; y < height; y++) {
-			for(uint32_t x = 0; x < width; x++) {
+		float32_t iweight = (float32_t)(npot_width / weight);
+		for(uint32_t y = 0; y < npot_height; y++) {
+			for(uint32_t x = 0; x < npot_width; x++) {
 				ImageColor pixel = kernel_sampler.get2D(x, y);
 				pixel.f.r *= iweight;
 				kernel_sampler.set2D(x, y, pixel);
@@ -274,7 +304,7 @@ namespace Tellusim {
 		}
 		
 		// create convolution texture
-		convolution_texture = device.createTexture2D(FormatRGf32, width / 2 + 1, height, Texture::FlagSource | Texture::FlagSurface);
+		convolution_texture = device.createTexture2D(FormatRGf32, npot_width / 2 + 1, npot_height, Texture::FlagSource | Texture::FlagSurface);
 		{
 			Compute compute = device.createCompute();
 			if(!convolution_texture || !transform.dispatch(compute, FourierTransform::ModeRf32i, FourierTransform::ForwardRtoC, convolution_texture, kernel_texture)) {
@@ -284,18 +314,27 @@ namespace Tellusim {
 		}
 		
 		// create forward textures
-		forward_textures[0] = device.createTexture2D(FormatRGf32, width / 2 + 1, height, Texture::FlagSource | Texture::FlagSurface);
-		forward_textures[1] = device.createTexture2D(FormatRGf32, width / 2 + 1, height, Texture::FlagSource | Texture::FlagSurface);
+		forward_textures[0] = device.createTexture2D(FormatRGf32, npot_width / 2 + 1, npot_height, Texture::FlagSource | Texture::FlagSurface);
+		forward_textures[1] = device.createTexture2D(FormatRGf32, npot_width / 2 + 1, npot_height, Texture::FlagSource | Texture::FlagSurface);
 		if(!forward_textures[0] || !forward_textures[1]) {
 			TS_LOG(Error, "BlueNoise::dispatch(): can't create forward textures\n");
 			return Image();
 		}
 		
 		// create backward texture
-		backward_texture = device.createTexture2D(FormatRf32, width, height, Texture::FlagSource | Texture::FlagSurface);
+		backward_texture = device.createTexture2D(FormatRf32, npot_width, npot_height, Texture::FlagSource | Texture::FlagSurface);
 		if(!backward_texture) {
 			TS_LOG(Error, "BlueNoise::dispatch(): can't create backward textures\n");
 			return Image();
+		}
+		
+		// create upscale texture
+		if(noise_texture.getSize() != backward_texture.getSize()) {
+			upscale_texture = device.createTexture2D(FormatRf32, npot_width, npot_height, Texture::FlagSurface);
+			if(!upscale_texture) {
+				TS_LOG(Error, "BlueNoise::dispatch(): can't create upscale textures\n");
+				return Image();
+			}
 		}
 		
 		// create initial sequence
@@ -393,7 +432,7 @@ namespace Tellusim {
 		
 		// done
 		print_progress(10000, begin);
-		Log::printf("\n");
+		Log::print("\n");
 		
 		return noise_image;
 	}
@@ -468,7 +507,7 @@ namespace Tellusim {
 		uint64_t time = Time::current();
 		if(time - old_time > Time::Seconds / 10) {
 			uint64_t remain = (time - begin) * (10000 - min(progress, 10000u)) / max(progress, 1u);
-			Log::printf("\rProgress: %4.1f%% Time: %s Remain: %s                \r", progress / 100.0f, String::fromTime(time - begin).get(), String::fromTime(remain).get());
+			Log::printf("\rProgress: %4.1f %% Time: %s Remain: %s                \r", progress / 100.0f, String::fromTime(time - begin).get(), String::fromTime(remain).get());
 			old_time = time;
 		}
 	}

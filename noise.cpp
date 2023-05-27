@@ -1,6 +1,6 @@
 // MIT License
 // 
-// Copyright (C) 2018-2022, Tellusim Technologies Inc. https://tellusim.com/
+// Copyright (C) 2018-2023, Tellusim Technologies Inc. https://tellusim.com/
 // 
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -126,15 +126,9 @@ int32_t main(int32_t argc, char **argv) {
 		height = input_image.getHeight();
 	}
 	
-	// check image size
-	if(!ispot(width) || !ispot(height)) {
-		TS_LOGF(Error, "%s: invalid image size %ux%u\n", argv[0], width, height);
-		return 1;
-	}
-	
 	// create context
 	Context context(app.getPlatform(), app.getDevice());
-	if(!context.create()) {
+	if(!context || !context.create()) {
 		TS_LOGF(Error, "%s: can't create context\n", argv[0]);
 		return 1;
 	}
@@ -151,7 +145,7 @@ int32_t main(int32_t argc, char **argv) {
 	
 	// noise shader cache
 	String path = Directory::getHomeDirectory() + "/" + CACHE_PATH;
-	if(Directory::isDirectory(path) || Directory::createDirectory(path.get())) {
+	if(Directory::isDirectory(path) || Directory::createDirectory(path)) {
 		String name = Directory::getHomeDirectory() + "/" + CACHE_PATH + CACHE_NAME;
 		Shader::setCache(name.get());
 	}
@@ -175,13 +169,17 @@ int32_t main(int32_t argc, char **argv) {
 				input_sampler.set2D(X, Y, ImageColor(255u));
 			}
 		}
-		Log::printf("Size: %ux%u Layers: %u Bits: %u Sigma: %g Epsilon: %g Init: %u%% Seed: %u\n", width, height, layers, bits, sigma, epsilon, init, seed);
+		Log::printf("Size: %ux%u Layers: %u Bits: %u Sigma: %g Epsilon: %g Init: %u %% Seed: %u\n", width, height, layers, bits, sigma, epsilon, init, seed);
 	} else {
 		Log::printf("Size: %ux%u Layers: %u Bits: %u Sigma: %g Epsilon: %g\n", width, height, layers, bits, sigma, epsilon);
 	}
 	
 	// dispatch blue noise
 	Image noise_image = blue_noise.dispatch(device, input_image, layers, sigma, epsilon);
+	if(!noise_image) {
+		TS_LOGF(Error, "%s: can't create noise\n", argv[0]);
+		return 1;
+	}
 	
 	// noise image format
 	if(bits == 8) noise_image = noise_image.toFormat(FormatRu8n);
@@ -198,7 +196,7 @@ int32_t main(int32_t argc, char **argv) {
 	}
 	
 	// forward transform image
-	if(forward_name) {
+	if(forward_name && ispot(width) && ispot(height)) {
 		Image forward_image;
 		if(layers > 1) {
 			for(uint32_t l = 0; l < layers; l++) {
@@ -216,7 +214,7 @@ int32_t main(int32_t argc, char **argv) {
 	}
 	
 	// forward transform X slice image
-	if(forward_x_name && layers > 1) {
+	if(forward_x_name && layers > 1 && ispot(width) && ispot(layers)) {
 		Image slice_image;
 		Image forward_image;
 		slice_image.create2D(noise_image.getFormat(), width, layers);
@@ -239,7 +237,7 @@ int32_t main(int32_t argc, char **argv) {
 	}
 	
 	// forward transform Y slice image
-	if(forward_y_name && layers > 1) {
+	if(forward_y_name && layers > 1 && ispot(height) && ispot(layers)) {
 		Image slice_image;
 		Image forward_image;
 		slice_image.create2D(noise_image.getFormat(), layers, height);

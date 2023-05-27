@@ -1,6 +1,6 @@
 // MIT License
 // 
-// Copyright (C) 2018-2022, Tellusim Technologies Inc. https://tellusim.com/
+// Copyright (C) 2018-2023, Tellusim Technologies Inc. https://tellusim.com/
 // 
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -33,11 +33,15 @@
 	 */
 	void main() {
 		
+		ivec2 texture_size = textureSize(in_texture, 0);
 		ivec2 global_id = ivec2(gl_GlobalInvocationID.xy);
 		
-		float value = 1.0f - texelFetch(in_texture, global_id, 0).x;
-		
-		imageStore(out_surface, global_id, vec4(value, 0.0f, 0.0f, 0.0f));
+		if(all(lessThan(global_id, texture_size))) {
+			
+			float value = 1.0f - texelFetch(in_texture, global_id, 0).x;
+			
+			imageStore(out_surface, global_id, vec4(value, 0.0f, 0.0f, 0.0f));
+		}
 	}
 	
 #elif FILTER_SHADER
@@ -199,6 +203,7 @@
 	layout(local_size_x = GROUP_SIZE) in;
 	
 	layout(std140, binding = 0) uniform UpdateParameters {
+		ivec2 texture_size;
 		float value;
 		uint index;
 	};
@@ -212,11 +217,18 @@
 	 */
 	void main() {
 		
+		ivec2 surface_size = imageSize(out_surface);
 		uint local_id = gl_LocalInvocationIndex;
 		
 		[[branch]] if(local_id == 0u) {
 			
 			ivec4 position = position_buffer[0];
+			
+			// downscale position
+			ivec2 offset = (texture_size - surface_size) / 2;
+			if(position.x < offset.x) position.x += surface_size.x;
+			if(position.y < offset.y) position.y += surface_size.y;
+			position.xy = (position.xy - offset) % surface_size;
 			
 			// update noise
 			imageStore(out_surface, position.xy, vec4(value, 0.0f, 0.0f, 0.0f));
@@ -243,14 +255,18 @@
 	 */
 	void main() {
 		
+		ivec2 surface_size = imageSize(out_surface);
 		ivec2 global_id = ivec2(gl_GlobalInvocationID.xy);
 		
-		int index = width * global_id.y + global_id.x;
-		ivec2 position = sequence_buffer[index].xy;
-		
-		float value = float(index) / float(width * height - 1);
-		
-		imageStore(out_surface, position, vec4(value, 0.0f, 0.0f, 0.0f));
+		if(all(lessThan(global_id, surface_size))) {
+			
+			int index = width * global_id.y + global_id.x;
+			ivec2 position = sequence_buffer[index].xy;
+			
+			float value = float(index) / float(width * height - 1);
+			
+			imageStore(out_surface, position, vec4(value, 0.0f, 0.0f, 0.0f));
+		}
 	}
 	
 #elif LAYER_SHADER
@@ -271,9 +287,38 @@
 		ivec2 size = textureSize(in_texture, 0);
 		ivec2 global_id = ivec2(gl_GlobalInvocationID.xy);
 		
-		float value = 1.0f - texelFetch(in_texture, size - global_id - 1, 0).x;
+		if(all(lessThan(global_id, size))) {
+			
+			float value = 1.0f - texelFetch(in_texture, size - global_id - 1, 0).x;
+			
+			value = (value < threshold) ? 1.0f : 0.0f;
+			
+			imageStore(out_surface, global_id, vec4(value, 0.0f, 0.0f, 0.0f));
+		}
+	}
+	
+#elif UPSCALE_SHADER
+	
+	layout(local_size_x = GROUP_SIZE, local_size_y = GROUP_SIZE) in;
+	
+	layout(binding = 0, set = 0) uniform texture2D in_texture;
+	layout(binding = 1, set = 0, r32f) uniform writeonly image2D out_surface;
+	
+	/*
+	 */
+	void main() {
 		
-		value = (value < threshold) ? 1.0f : 0.0f;
+		ivec2 surface_size = imageSize(out_surface);
+		ivec2 texture_size = textureSize(in_texture, 0);
+		ivec2 global_id = ivec2(gl_GlobalInvocationID.xy);
+		
+		ivec2 position = global_id;
+		ivec2 offset = (surface_size - texture_size) / 2;
+		if(position.x < offset.x) position.x += texture_size.x;
+		if(position.y < offset.y) position.y += texture_size.y;
+		position = (position - offset) % texture_size;
+		
+		float value = texelFetch(in_texture, position, 0).x;
 		
 		imageStore(out_surface, global_id, vec4(value, 0.0f, 0.0f, 0.0f));
 	}

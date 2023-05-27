@@ -1,6 +1,6 @@
 // MIT License
 // 
-// Copyright (C) 2018-2022, Tellusim Technologies Inc. https://tellusim.com/
+// Copyright (C) 2018-2023, Tellusim Technologies Inc. https://tellusim.com/
 // 
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -78,10 +78,12 @@ namespace Tellusim {
 			Kernel update_kernel;			// update noise kernel
 			Kernel render_kernel;			// render noise kernel
 			Kernel layer_kernel;			// layer noise kernel
+			Kernel upscale_kernel;			// upscale kernel
 			
 			Texture convolution_texture;	// convolution texture
 			Texture forward_textures[2];	// forward textures
 			Texture backward_texture;		// backward texture
+			Texture upscale_texture;		// upscale texture
 			
 			Buffer sequence_buffer;			// noise sequence buffer
 			Buffer position_buffer;			// noise position buffer
